@@ -65,6 +65,8 @@ export default function App() {
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isPlaylistOpen, setIsPlaylistOpen] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
   
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyzerRef = useRef<AnalyserNode | null>(null);
@@ -84,6 +86,23 @@ export default function App() {
 
   const [isDecoding, setIsDecoding] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // --- Persistence Logic ---
+
+  useEffect(() => {
+    const savedPlaylist = localStorage.getItem('aura_playlist');
+    if (savedPlaylist) {
+      try {
+        setPlaylist(JSON.parse(savedPlaylist));
+      } catch (e) {
+        console.error("Failed to load playlist", e);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('aura_playlist', JSON.stringify(playlist));
+  }, [playlist]);
 
   // --- Fullscreen Logic ---
 
@@ -137,10 +156,12 @@ export default function App() {
       analyzerRef.current = analyzer;
       gainNodeRef.current = gainNode;
       audioBufferRef.current = audioBuffer;
+      setDuration(audioBuffer.duration);
       
       setCurrentTrack(track);
       setIsPlaying(false);
       pausedAtRef.current = 0;
+      setCurrentTime(0);
     } catch (err) {
       console.error("Failed to decode audio", err);
     } finally {
@@ -170,20 +191,40 @@ export default function App() {
     setIsPlaying(true);
 
     source.onended = () => {
-      if (audioContextRef.current?.currentTime! - startTimeRef.current >= audioBufferRef.current?.duration!) {
+      if (audioContextRef.current && audioBufferRef.current && (audioContextRef.current.currentTime - startTimeRef.current >= audioBufferRef.current.duration - 0.1)) {
         setIsPlaying(false);
         pausedAtRef.current = 0;
+        setCurrentTime(0);
       }
     };
 
     const updateData = () => {
-      if (!analyzerRef.current) return;
+      if (!analyzerRef.current || !audioContextRef.current) return;
+      
+      // Update frequency data
       const dataArray = new Uint8Array(analyzerRef.current.frequencyBinCount);
       analyzerRef.current.getByteFrequencyData(dataArray);
       setAudioData(new Uint8Array(dataArray));
+
+      // Update current time
+      const current = audioContextRef.current.currentTime - startTimeRef.current;
+      setCurrentTime(current);
+
       animationFrameRef.current = requestAnimationFrame(updateData);
     };
     updateData();
+  };
+
+  const seekAudio = (time: number) => {
+    if (!audioContextRef.current || !audioBufferRef.current) return;
+    
+    const wasPlaying = isPlaying;
+    if (wasPlaying) pauseAudio();
+    
+    pausedAtRef.current = Math.max(0, Math.min(time, audioBufferRef.current.duration));
+    setCurrentTime(pausedAtRef.current);
+    
+    if (wasPlaying) playAudio();
   };
 
   const updateVolume = (newVolume: number) => {
@@ -397,14 +438,16 @@ export default function App() {
     if (!searchQuery.trim()) return;
     setIsSearching(true);
     try {
-      const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchQuery)}&media=music&limit=12`);
+      // Using Jamendo API for full tracks (Creative Commons)
+      const clientId = '56d30cce';
+      const response = await fetch(`https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=12&search=${encodeURIComponent(searchQuery)}&include=musicinfo&audioformat=mp32`);
       const data = await response.json();
       const tracks: Track[] = data.results.map((item: any) => ({
-        id: item.trackId.toString(),
-        name: item.trackName,
-        artist: item.artistName,
-        url: item.previewUrl,
-        artwork: item.artworkUrl100
+        id: item.id,
+        name: item.name,
+        artist: item.artist_name,
+        url: item.audio,
+        artwork: item.image || item.album_image
       }));
       setSearchResults(tracks);
     } catch (err) {
@@ -412,6 +455,12 @@ export default function App() {
     } finally {
       setIsSearching(false);
     }
+  };
+
+  const formatTime = (time: number) => {
+    const mins = Math.floor(time / 60);
+    const secs = Math.floor(time % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
   const addToPlaylist = (track: Track) => {
@@ -486,6 +535,44 @@ export default function App() {
 
         {/* Main Content */}
         <main className="flex-1 flex items-center justify-center p-8 relative">
+          {/* Current Track Info Display (Left Side) */}
+          <AnimatePresence>
+            {currentTrack && !isFullscreen && (
+              <motion.div
+                initial={{ opacity: 0, x: -100 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -100 }}
+                className="absolute left-8 top-1/2 -translate-y-1/2 flex flex-col gap-6 max-w-xs pointer-events-none"
+              >
+                <div className="relative group">
+                  <motion.div 
+                    animate={{ rotate: isPlaying ? 360 : 0 }}
+                    transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
+                    className="w-64 h-64 rounded-full overflow-hidden border-8 border-white/5 shadow-2xl shadow-purple-500/20"
+                  >
+                    {currentTrack.artwork ? (
+                      <img src={currentTrack.artwork} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                    ) : (
+                      <div className="w-full h-full bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center">
+                        <Music className="w-24 h-24 text-white/20" />
+                      </div>
+                    )}
+                  </motion.div>
+                  <div className="absolute inset-0 rounded-full border-4 border-white/10 pointer-events-none" />
+                </div>
+                
+                <div className="space-y-2">
+                  <h2 className="text-3xl font-black tracking-tighter leading-tight truncate">
+                    {currentTrack.name}
+                  </h2>
+                  <p className="text-lg font-medium text-white/40 uppercase tracking-widest truncate">
+                    {currentTrack.artist || 'Unknown Artist'}
+                  </p>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           <AnimatePresence mode="wait">
             {isSearchOpen && (
               <motion.div
@@ -645,7 +732,7 @@ export default function App() {
 
                     <div className="flex items-center gap-4">
                       <div className="flex items-center gap-3 bg-white/5 rounded-full px-4 py-2 group">
-                        {volume === 0 ? <VolumeX className="w-4 h-4 text-white/40" /> : <Volume2 className="w-4 h-4 text-white/40" />}
+                        {volume === 0 ? <VolumeX className="w-4 h-4 text-white/40 cursor-pointer" onClick={() => updateVolume(0.8)} /> : <Volume2 className="w-4 h-4 text-white/40 cursor-pointer" onClick={() => updateVolume(0)} />}
                         <input 
                           type="range" 
                           min="0" 
@@ -653,7 +740,7 @@ export default function App() {
                           step="0.01" 
                           value={volume}
                           onChange={(e) => updateVolume(parseFloat(e.target.value))}
-                          className="w-20 accent-white"
+                          className="w-20 accent-white cursor-pointer"
                         />
                       </div>
                       <button 
@@ -671,6 +758,28 @@ export default function App() {
                       >
                         {isPlaying ? <Pause className="fill-current" /> : <Play className="fill-current ml-1" />}
                       </button>
+                    </div>
+                  </div>
+
+                  {/* Progress Bar */}
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-[10px] font-bold text-white/40 uppercase tracking-widest">
+                      <span>{formatTime(currentTime)}</span>
+                      <span>{formatTime(duration)}</span>
+                    </div>
+                    <div className="relative h-1.5 w-full bg-white/10 rounded-full overflow-hidden group cursor-pointer">
+                      <input 
+                        type="range"
+                        min="0"
+                        max={duration || 100}
+                        value={currentTime}
+                        onChange={(e) => seekAudio(parseFloat(e.target.value))}
+                        className="absolute inset-0 w-full h-full opacity-0 z-10 cursor-pointer"
+                      />
+                      <motion.div 
+                        className="absolute h-full bg-white rounded-full"
+                        style={{ width: `${(currentTime / (duration || 1)) * 100}%` }}
+                      />
                     </div>
                   </div>
 
