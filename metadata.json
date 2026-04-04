@@ -1,0 +1,5 @@
+{
+  "name": "Aura 3D Visualizer",
+  "description": "A high-end 3D music visualizer featuring a pulsing DNA spiral that reacts to your local MP3 files.",
+  "requestFramePermissions": []
+}
