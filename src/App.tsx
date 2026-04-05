@@ -13,6 +13,7 @@ interface Track {
   url?: string;
   file?: File;
   artwork?: string;
+  isFullTrack?: boolean;
 }
 
 interface VibeConfig {
@@ -126,7 +127,7 @@ export default function App() {
 
   // --- Audio Logic ---
 
-  const initAudio = async (track: Track) => {
+  const initAudio = async (track: Track, autoPlay: boolean = false) => {
     setIsDecoding(true);
     try {
       if (audioContextRef.current) {
@@ -145,6 +146,7 @@ export default function App() {
         arrayBuffer = await track.file.arrayBuffer();
       } else if (track.url) {
         const response = await fetch(track.url);
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         arrayBuffer = await response.arrayBuffer();
       } else {
         throw new Error("No audio source found");
@@ -159,13 +161,38 @@ export default function App() {
       setDuration(audioBuffer.duration);
       
       setCurrentTrack(track);
-      setIsPlaying(false);
       pausedAtRef.current = 0;
       setCurrentTime(0);
+
+      if (autoPlay) {
+        // We need to wait a bit for state to settle or just call playAudio directly with refs
+        // Since playAudio uses refs, we can call it after setting refs
+        setIsPlaying(true);
+        // We'll call playAudio in a timeout to ensure state is updated if needed, 
+        // but playAudio mostly uses refs so it should be fine.
+        setTimeout(() => {
+          playAudio();
+        }, 100);
+      } else {
+        setIsPlaying(false);
+      }
     } catch (err) {
       console.error("Failed to decode audio", err);
+      alert("Failed to load audio. This might be due to CORS restrictions or an invalid file.");
     } finally {
       setIsDecoding(false);
+    }
+  };
+
+  const playNextTrack = () => {
+    if (playlist.length === 0 || !currentTrack) return;
+    
+    const currentIndex = playlist.findIndex(t => t.id === currentTrack.id);
+    // If not in playlist or last track, we might want to loop or stop
+    // For now, let's play the next one if it exists
+    if (currentIndex !== -1 && currentIndex < playlist.length - 1) {
+      const nextTrack = playlist[currentIndex + 1];
+      initAudio(nextTrack, true);
     }
   };
 
@@ -195,6 +222,9 @@ export default function App() {
         setIsPlaying(false);
         pausedAtRef.current = 0;
         setCurrentTime(0);
+        
+        // Auto-play next track if in playlist
+        playNextTrack();
       }
     };
 
@@ -428,7 +458,8 @@ export default function App() {
       const track: Track = {
         id: Math.random().toString(36).substr(2, 9),
         name: droppedFile.name,
-        file: droppedFile
+        file: droppedFile,
+        isFullTrack: true
       };
       initAudio(track);
     }
@@ -437,19 +468,48 @@ export default function App() {
   const searchMusic = async () => {
     if (!searchQuery.trim()) return;
     setIsSearching(true);
+    setSearchResults([]);
     try {
-      // Using Jamendo API for full tracks (Creative Commons)
-      const clientId = '56d30cce';
-      const response = await fetch(`https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=12&search=${encodeURIComponent(searchQuery)}&include=musicinfo&audioformat=mp32`);
-      const data = await response.json();
-      const tracks: Track[] = data.results.map((item: any) => ({
-        id: item.id,
-        name: item.name,
-        artist: item.artist_name,
-        url: item.audio,
-        artwork: item.image || item.album_image
-      }));
-      setSearchResults(tracks);
+      // 1. Try iTunes (Best for mainstream artists like Kirk Franklin)
+      const itunesResponse = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchQuery)}&media=music&limit=20`);
+      const itunesData = await itunesResponse.json();
+      
+      let allTracks: Track[] = [];
+      
+      if (itunesData.results && itunesData.results.length > 0) {
+        allTracks = itunesData.results.map((item: any) => ({
+          id: item.trackId ? `itunes_${item.trackId}` : `itunes_${Math.random()}`,
+          name: item.trackName,
+          artist: item.artistName,
+          url: item.previewUrl,
+          artwork: item.artworkUrl100 ? item.artworkUrl100.replace('100x100', '600x600') : undefined,
+          isFullTrack: false
+        }));
+      }
+
+      // 2. Also try Jamendo (Best for full tracks/independent music)
+      try {
+        const jamendoResponse = await fetch(`https://api.jamendo.com/v3.0/tracks/?client_id=56d30cce&format=json&limit=10&fuzzysearch=${encodeURIComponent(searchQuery)}&include=musicinfo&audioformat=mp32`);
+        const jamendoData = await jamendoResponse.json();
+        if (jamendoData.results && jamendoData.results.length > 0) {
+          const jamendoTracks = jamendoData.results.map((item: any) => ({
+            id: `jamendo_${item.id}`,
+            name: item.name,
+            artist: item.artist_name,
+            url: item.audio,
+            artwork: item.image || item.album_image,
+            isFullTrack: true
+          }));
+          allTracks = [...allTracks, ...jamendoTracks];
+        }
+      } catch (e) {
+        console.error("Jamendo fallback failed", e);
+      }
+
+      // Sort to prioritize full tracks
+      allTracks.sort((a, b) => (b.isFullTrack ? 1 : 0) - (a.isFullTrack ? 1 : 0));
+
+      setSearchResults(allTracks);
     } catch (err) {
       console.error("Search failed", err);
     } finally {
@@ -583,39 +643,75 @@ export default function App() {
                 className="absolute left-8 top-0 bottom-0 w-96 bg-black/60 backdrop-blur-3xl border-r border-white/10 z-20 p-6 flex flex-col gap-6 pointer-events-auto"
               >
                 <div className="flex justify-between items-center">
-                  <h2 className="text-xl font-bold">Search Music</h2>
+                  <div>
+                    <h2 className="text-xl font-bold">Search Music</h2>
+                    <p className="text-[10px] text-white/40 uppercase tracking-widest mt-1">Mainstream tracks are 30s previews</p>
+                  </div>
                   <button onClick={() => setIsSearchOpen(false)} className="text-white/40 hover:text-white"><X className="w-5 h-5" /></button>
                 </div>
                 <div className="relative">
                   <input 
                     type="text" 
                     placeholder="Search artist or song..."
-                    className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 outline-none focus:border-white/30 transition-all"
+                    className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-4 pr-12 outline-none focus:border-white/30 transition-all"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && searchMusic()}
                   />
-                  <button 
-                    onClick={searchMusic}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white"
-                  >
-                    {isSearching ? <Loader2 className="w-5 h-5 animate-spin" /> : <Search className="w-5 h-5" />}
-                  </button>
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                    {searchQuery && (
+                      <button 
+                        onClick={() => { setSearchQuery(''); setSearchResults([]); }}
+                        className="text-white/20 hover:text-white transition-colors"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
+                    <button 
+                      onClick={searchMusic}
+                      className="text-white/40 hover:text-white transition-colors"
+                    >
+                      {isSearching ? <Loader2 className="w-5 h-5 animate-spin" /> : <Search className="w-5 h-5" />}
+                    </button>
+                  </div>
                 </div>
                 <div className="flex-1 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
-                  {searchResults.map(track => (
-                    <div key={track.id} className="group flex items-center gap-3 p-2 rounded-xl hover:bg-white/5 transition-all">
-                      <img src={track.artwork} alt="" className="w-10 h-10 rounded-lg object-cover" referrerPolicy="no-referrer" />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-bold truncate">{track.name}</p>
-                        <p className="text-[10px] text-white/40 truncate uppercase tracking-wider">{track.artist}</p>
-                      </div>
-                      <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button onClick={() => addToPlaylist(track)} className="p-2 rounded-lg bg-white/10 hover:bg-white/20 text-white"><Plus className="w-4 h-4" /></button>
-                        <button onClick={() => initAudio(track)} className="p-2 rounded-lg bg-white text-black hover:scale-105"><Play className="w-4 h-4 fill-current" /></button>
-                      </div>
+                  {isSearching ? (
+                    <div className="h-full flex flex-col items-center justify-center text-white/20 gap-4">
+                      <Loader2 className="w-12 h-12 animate-spin" />
+                      <p className="text-xs uppercase tracking-widest">Searching...</p>
                     </div>
-                  ))}
+                  ) : searchResults.length === 0 && searchQuery ? (
+                    <div className="h-full flex flex-col items-center justify-center text-white/20 gap-4">
+                      <Search className="w-12 h-12" />
+                      <p className="text-xs uppercase tracking-widest">No results found</p>
+                    </div>
+                  ) : (
+                    searchResults.map(track => (
+                      <div key={track.id} className="group flex items-center gap-3 p-2 rounded-xl hover:bg-white/5 transition-all">
+                        {track.artwork ? (
+                          <img src={track.artwork} alt="" className="w-10 h-10 rounded-lg object-cover" referrerPolicy="no-referrer" />
+                        ) : (
+                          <div className="w-10 h-10 rounded-lg bg-white/5 flex items-center justify-center"><Music className="w-5 h-5 text-white/20" /></div>
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <p className="text-sm font-bold truncate">{track.name}</p>
+                            {track.isFullTrack ? (
+                              <span className="text-[8px] px-1 py-0.5 rounded bg-green-500/20 text-green-400 font-bold uppercase tracking-tighter">Full</span>
+                            ) : (
+                              <span className="text-[8px] px-1 py-0.5 rounded bg-white/10 text-white/40 font-bold uppercase tracking-tighter">30s</span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-white/40 truncate uppercase tracking-wider">{track.artist}</p>
+                        </div>
+                        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button onClick={() => addToPlaylist(track)} className="p-2 rounded-lg bg-white/10 hover:bg-white/20 text-white"><Plus className="w-4 h-4" /></button>
+                          <button onClick={() => initAudio(track, true)} className="p-2 rounded-lg bg-white text-black hover:scale-105"><Play className="w-4 h-4 fill-current" /></button>
+                        </div>
+                      </div>
+                    ))
+                  )}
                 </div>
               </motion.div>
             )}
@@ -647,12 +743,19 @@ export default function App() {
                           <div className="w-10 h-10 rounded-lg bg-white/5 flex items-center justify-center"><Music className="w-5 h-5 text-white/20" /></div>
                         )}
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm font-bold truncate">{track.name}</p>
+                          <div className="flex items-center gap-2">
+                            <p className="text-sm font-bold truncate">{track.name}</p>
+                            {track.isFullTrack ? (
+                              <span className="text-[8px] px-1 py-0.5 rounded bg-green-500/20 text-green-400 font-bold uppercase tracking-tighter">Full</span>
+                            ) : (
+                              <span className="text-[8px] px-1 py-0.5 rounded bg-white/10 text-white/40 font-bold uppercase tracking-tighter">30s</span>
+                            )}
+                          </div>
                           <p className="text-[10px] text-white/40 truncate uppercase tracking-wider">{track.artist || 'Local File'}</p>
                         </div>
                         <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button onClick={() => removeFromPlaylist(track.id)} className="p-2 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400"><Trash2 className="w-4 h-4" /></button>
-                          <button onClick={() => initAudio(track)} className="p-2 rounded-lg bg-white text-black hover:scale-105"><Play className="w-4 h-4 fill-current" /></button>
+                          <button onClick={() => initAudio(track, true)} className="p-2 rounded-lg bg-white text-black hover:scale-105"><Play className="w-4 h-4 fill-current" /></button>
                         </div>
                       </div>
                     ))
